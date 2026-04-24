@@ -42,7 +42,7 @@ JOYUN'S CURRENT PRODUCTS:
 
 TODAY'S DATE: {TODAY}
 
-YOUR JOB: Research the global skincare market today and find 15-25 actionable intelligence items.
+YOUR JOB: Research the global skincare market today and find 8-12 actionable intelligence items.
 
 RESEARCH SCOPE (cast a wide net — go beyond direct competitors):
 1. DIRECT competitors: brands using Centella, PDRN, vegan mucin, snail mucin, rose extracts
@@ -105,7 +105,7 @@ After your research, output your findings inside a single ```json code block. Us
 ```
 
 CRITICAL RULES:
-- Items count must be 15-25
+- Items count must be 8-12
 - threat_level reasoning: HIGH = directly competes with ROSE-03 or ROSE-04 at similar price; MEDIUM = same category, different positioning; LOW = same brand space but different product; ADJACENT = relevant trend signal
 - Use real, current data from your searches — do NOT fabricate brands or prices
 - Convert prices: 1 USD ≈ 83.5 INR (use this if you only know one)
@@ -121,12 +121,12 @@ def run_research() -> dict:
     print(f"[{datetime.now().isoformat()}] Calling Claude API with web_search…")
     response = client.messages.create(
         model=MODEL,
-        max_tokens=16000,
+        max_tokens=4000,
         messages=[{"role": "user", "content": RESEARCH_PROMPT}],
         tools=[{
             "type": "web_search_20260209",  # latest version with dynamic filtering
             "name": "web_search",
-            "max_uses": 15,
+            "max_uses": 5,
         }],
     )
 
