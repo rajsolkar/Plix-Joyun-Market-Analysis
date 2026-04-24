@@ -31,7 +31,7 @@ TODAY = datetime.now(IST).strftime("%Y-%m-%d")
 CSV_PATH = DATA_DIR / f"joyun_intel_{TODAY}.csv"
 REPORT_PATH = DATA_DIR / f"joyun_report_{TODAY}.md"
 
-MODEL = "claude-opus-4-7"  # Best model for research; switch to claude-sonnet-4-6 for cost savings
+MODEL = "claude-sonnet-4-6"
 
 # ─── The research prompt ──────────────────────────────────────────────────────
 RESEARCH_PROMPT = f"""You are the daily competitive intelligence analyst for Joyun, an Indian skincare brand.
