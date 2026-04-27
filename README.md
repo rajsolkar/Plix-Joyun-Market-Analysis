@@ -1,7 +1,10 @@
-# Joyun Competitive Intelligence System
+# Joyun Competitive Intelligence System 
 
+```
+All Rights Reserved
+```
 Automated daily competitive intelligence for Joyun (Indian skincare brand).
-**Replaces the previous Kimi-based pipeline with Claude API + GitHub Actions.**
+**Using Claude API + GitHub Actions.**
 
 ## Pipeline
 
@@ -29,10 +32,8 @@ Settings → Secrets and variables → Actions → New repository secret:
 | Name                  | Value |
 |-----------------------|-------|
 | `ANTHROPIC_API_KEY`   | Get from https://console.anthropic.com (you must enable web search in the console too) |
-| `TELEGRAM_BOT_TOKEN`  | `8609818939:AAHReRx8EUTtEMbJTfI92bG8MmVPhrv_84o` |
-| `TELEGRAM_CHAT_ID`    | `7403219155` |
-
-> ⚠️ **Rotate that bot token now** — you pasted it in plaintext. Talk to @BotFather → `/revoke` → `/token` to issue a new one, then put the new one in the secret.
+| `TELEGRAM_BOT_TOKEN`  | `86xxxxxxx:AAxxxxxxxxxxxxxxxxx` |
+| `TELEGRAM_CHAT_ID`    | `74xxxxxxxxxxx` |
 
 ### 3. Enable web search in Anthropic Console
 The Anthropic admin must turn on web search for your org: Console → Settings → enable web_search tool.
@@ -42,7 +43,7 @@ The Anthropic admin must turn on web search for your org: Console → Settings �
 pip install -r requirements.txt
 export ANTHROPIC_API_KEY=sk-ant-...
 export TELEGRAM_BOT_TOKEN=...
-export TELEGRAM_CHAT_ID=7403219155
+export TELEGRAM_CHAT_ID=74xxxxxxxx
 python scripts/run_intel.py
 python scripts/send_telegram.py
 ```
