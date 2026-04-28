@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
 Joyun Competitive Intelligence — Daily Research Runner
-Replaces Kimi with Claude API + web_search tool.
+Supports BOTH Google Gemini (free tier) and Anthropic Claude (paid).
+
+Switch providers with the LLM_PROVIDER env var:
+  LLM_PROVIDER=gemini  (default)
+  LLM_PROVIDER=claude
 
 Pipeline:
-  1. Call Claude API with web_search to research the global skincare market
-  2. Parse Claude's structured output into CSV (10 cols per CSV_STRUCTURE.md)
-  3. Write a Markdown report
-  4. Render dashboard.html from template
+  1. Call the configured LLM with web search to research skincare market
+  2. Parse structured JSON output
+  3. Write CSV (10 cols per CSV_STRUCTURE.md)
+  4. Write Markdown report
+  5. Render dashboard.html from template
 """
 
 import os
@@ -16,8 +21,6 @@ import csv
 import re
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-
-import anthropic
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent.parent
@@ -31,18 +34,22 @@ TODAY = datetime.now(IST).strftime("%Y-%m-%d")
 CSV_PATH = DATA_DIR / f"joyun_intel_{TODAY}.csv"
 REPORT_PATH = DATA_DIR / f"joyun_report_{TODAY}.md"
 
-MODEL = "claude-sonnet-4-6"
+PROVIDER = os.environ.get("LLM_PROVIDER", "gemini").lower()
 
-# ─── The research prompt ──────────────────────────────────────────────────────
+# Model knobs — change these at the top, not buried in code.
+GEMINI_MODEL = "gemini-2.5-flash"
+CLAUDE_MODEL = "claude-sonnet-4-6"
+
+# ─── The research prompt (provider-agnostic) ──────────────────────────────────
 RESEARCH_PROMPT = f"""You are the daily competitive intelligence analyst for Joyun, an Indian skincare brand.
 
 JOYUN'S CURRENT PRODUCTS:
-- ROSE-03 Vegan Mucin Essence — ₹299 (~$3.60 USD)
-- ROSE-04 PDRN Micro-Needle Serum — ₹950 (~$11.40 USD)
+- ROSE-03 Vegan Mucin Essence — INR 299 (~$3.60 USD)
+- ROSE-04 PDRN Micro-Needle Serum — INR 950 (~$11.40 USD)
 
 TODAY'S DATE: {TODAY}
 
-YOUR JOB: Research the global skincare market today and find 8-12 actionable intelligence items.
+YOUR JOB: Research the global skincare market today and find 10-15 actionable intelligence items.
 
 RESEARCH SCOPE (cast a wide net — go beyond direct competitors):
 1. DIRECT competitors: brands using Centella, PDRN, vegan mucin, snail mucin, rose extracts
@@ -60,21 +67,21 @@ SEARCH STRATEGY:
 - Search recent skincare news from the past 7 days
 - Check K-beauty and J-beauty trend trackers
 - Look at Indian skincare launches and DTC brand news
-- Find ingredient innovation reports
 
-OUTPUT FORMAT (STRICTLY FOLLOW THIS):
-After your research, output your findings inside a single ```json code block. Use this exact schema:
+OUTPUT FORMAT (STRICT — CRITICAL):
+Your final response must include a single ```json code block containing your findings.
+Use this EXACT schema. All fields required (use null where unknown):
 
 ```json
 {{
-  "summary": "2-3 sentence executive summary of today's most important findings for Joyun",
-  "alert": "ONE most urgent thing Joyun's team should know about today (or null if nothing urgent)",
+  "summary": "2-3 sentence executive summary",
+  "alert": "ONE most urgent thing for Joyun today, or null if nothing urgent",
   "stats": {{
-    "items_tracked": <int>,
-    "high_threat": <int>,
-    "medium_threat": <int>,
-    "low_threat": <int>,
-    "adjacent": <int>
+    "items_tracked": 12,
+    "high_threat": 0,
+    "medium_threat": 0,
+    "low_threat": 0,
+    "adjacent": 0
   }},
   "hot_ingredients": [
     {{"ingredient": "name", "trend": "what's happening", "joyun_relevance": "why Joyun should care"}}
@@ -94,8 +101,8 @@ After your research, output your findings inside a single ```json code block. Us
       "product": "Product Name",
       "category": "Essence|Serum|Cleanser|Sunscreen|Mask|Toner|Eye Care|Body Care|Lip Care|Other",
       "key_ingredients": "ingredient1, ingredient2",
-      "price_inr": <number or null>,
-      "price_usd": <number or null>,
+      "price_inr": null,
+      "price_usd": null,
       "threat_level": "HIGH|MEDIUM|LOW|ADJACENT",
       "direct_competitor": "YES|NO",
       "notes": "1-2 sentences of why this matters"
@@ -105,55 +112,87 @@ After your research, output your findings inside a single ```json code block. Us
 ```
 
 CRITICAL RULES:
-- Items count must be 8-12
-- threat_level reasoning: HIGH = directly competes with ROSE-03 or ROSE-04 at similar price; MEDIUM = same category, different positioning; LOW = same brand space but different product; ADJACENT = relevant trend signal
-- Use real, current data from your searches — do NOT fabricate brands or prices
-- Convert prices: 1 USD ≈ 83.5 INR (use this if you only know one)
-- Output the JSON block AT THE END of your response, after your research narrative
+- Items count: 10-15
+- threat_level: HIGH = directly competes with ROSE-03 or ROSE-04 at similar price; MEDIUM = same category, different positioning; LOW = same brand space but different product; ADJACENT = relevant trend signal
+- Use REAL data from your searches — do not fabricate brands or prices
+- If you only know one of price_inr / price_usd, convert: 1 USD ≈ 83.5 INR
+- The ```json block must be the LAST thing in your response
+- Make sure stats numbers actually match what's in the items array
 """
 
 
-# ─── Main pipeline ────────────────────────────────────────────────────────────
-def run_research() -> dict:
-    """Call Claude API with web_search, return parsed JSON findings."""
+# ─── Provider implementations ─────────────────────────────────────────────────
+def run_research_gemini() -> str:
+    """Call Gemini 2.5 Flash with google_search grounding. Returns full text."""
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
+    print(f"[{datetime.now().isoformat()}] Calling Gemini ({GEMINI_MODEL}) with google_search…")
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=RESEARCH_PROMPT,
+        config=types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+            temperature=0.3,
+        ),
+    )
+    return response.text or ""
+
+
+def run_research_claude() -> str:
+    """Call Claude with web_search tool. Returns full text."""
+    import anthropic
+
     client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
 
-    print(f"[{datetime.now().isoformat()}] Calling Claude API with web_search…")
+    print(f"[{datetime.now().isoformat()}] Calling Claude ({CLAUDE_MODEL}) with web_search…")
     response = client.messages.create(
-        model=MODEL,
-        max_tokens=4000,
+        model=CLAUDE_MODEL,
+        max_tokens=8000,
         messages=[{"role": "user", "content": RESEARCH_PROMPT}],
         tools=[{
-            "type": "web_search_20260209",  # latest version with dynamic filtering
+            "type": "web_search_20250305",
             "name": "web_search",
-            "max_uses": 5,
+            "max_uses": 8,
         }],
     )
+    return "".join(b.text for b in response.content if b.type == "text")
 
-    # Concatenate all text blocks from the response
-    full_text = "".join(
-        block.text for block in response.content if block.type == "text"
-    )
 
-    # Extract the JSON block
+# ─── Pipeline ────────────────────────────────────────────────────────────────
+def run_research() -> dict:
+    if PROVIDER == "gemini":
+        full_text = run_research_gemini()
+    elif PROVIDER == "claude":
+        full_text = run_research_claude()
+    else:
+        raise ValueError(f"Unknown LLM_PROVIDER: {PROVIDER}")
+
+    # Try fenced ```json block first; fall back to last {…} blob if model omitted fences
     match = re.search(r"```json\s*(\{.*?\})\s*```", full_text, re.DOTALL)
-    if not match:
-        raise ValueError(
-            "Claude did not return a parseable JSON block. Full response:\n"
-            + full_text[:2000]
-        )
+    if match:
+        json_str = match.group(1)
+    else:
+        # fallback: grab the largest balanced JSON object in the response
+        candidates = re.findall(r"\{(?:[^{}]|(?:\{[^{}]*\}))*\}", full_text, re.DOTALL)
+        candidates = [c for c in candidates if '"items"' in c and '"summary"' in c]
+        if not candidates:
+            raise ValueError(
+                f"{PROVIDER} did not return parseable JSON. First 2000 chars:\n{full_text[:2000]}"
+            )
+        json_str = max(candidates, key=len)
 
-    findings = json.loads(match.group(1))
-    print(f"[{datetime.now().isoformat()}] Got {len(findings.get('items', []))} items")
+    findings = json.loads(json_str)
+    print(f"Got {len(findings.get('items', []))} items")
 
-    # Stash the raw narrative for the markdown report
     narrative = full_text.split("```json")[0].strip()
     findings["_narrative"] = narrative
     return findings
 
 
 def write_csv(findings: dict) -> None:
-    """Write the 10-column CSV per CSV_STRUCTURE.md."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with CSV_PATH.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -161,15 +200,15 @@ def write_csv(findings: dict) -> None:
             "Date", "Brand", "Product", "Category", "Key_Ingredients",
             "Price_INR", "Price_USD", "Threat_Level", "Direct_Competitor", "Notes",
         ])
-        for item in findings["items"]:
+        for item in findings.get("items", []):
             w.writerow([
                 TODAY,
                 item.get("brand", ""),
                 item.get("product", ""),
                 item.get("category", ""),
                 item.get("key_ingredients", ""),
-                item.get("price_inr", "") or "",
-                item.get("price_usd", "") or "",
+                item.get("price_inr") or "",
+                item.get("price_usd") or "",
                 item.get("threat_level", ""),
                 item.get("direct_competitor", ""),
                 item.get("notes", ""),
@@ -178,31 +217,32 @@ def write_csv(findings: dict) -> None:
 
 
 def write_report(findings: dict) -> None:
-    """Write the daily Markdown report."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     lines = [
         f"# Joyun Competitive Intelligence — {TODAY}",
+        "",
+        f"_Provider: {PROVIDER}_",
         "",
         "## Executive Summary",
         findings.get("summary", "_No summary._"),
         "",
     ]
     if findings.get("alert"):
-        lines += ["## ⚠️ Urgent Alert", findings["alert"], ""]
+        lines += ["## Urgent Alert", findings["alert"], ""]
 
     lines += ["## Hot Ingredients", ""]
     for ing in findings.get("hot_ingredients", []):
-        lines.append(f"- **{ing['ingredient']}** — {ing['trend']} _(Joyun: {ing['joyun_relevance']})_")
+        lines.append(f"- **{ing.get('ingredient','')}** — {ing.get('trend','')} _(Joyun: {ing.get('joyun_relevance','')})_")
     lines.append("")
 
     lines += ["## Competitor Activity", ""]
     for c in findings.get("competitor_activity", []):
-        lines.append(f"- **{c['brand']}** [{c['threat_level']}] — {c['activity']} → {c['implication']}")
+        lines.append(f"- **{c.get('brand','')}** [{c.get('threat_level','')}] — {c.get('activity','')} → {c.get('implication','')}")
     lines.append("")
 
     lines += ["## Opportunities", ""]
     for o in findings.get("opportunities", []):
-        lines.append(f"- **{o['opportunity']}** — {o['rationale']} → _Action: {o['suggested_action']}_")
+        lines.append(f"- **{o.get('opportunity','')}** — {o.get('rationale','')} → _Action: {o.get('suggested_action','')}_")
     lines.append("")
 
     lines += ["## Where Joyun Can Shine", ""]
@@ -217,42 +257,37 @@ def write_report(findings: dict) -> None:
 
 
 def render_dashboard(findings: dict) -> None:
-    """Fill the HTML template with today's findings."""
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
 
     def threat_class(level: str) -> str:
         return {"HIGH": "high", "MEDIUM": "medium", "LOW": "low", "ADJACENT": "adjacent"}.get(level, "low")
 
-    # Hot ingredients HTML
     ing_html = "\n".join(
-        f'<div class="card"><h3>{i["ingredient"]}</h3>'
-        f'<p class="trend">{i["trend"]}</p>'
-        f'<p class="relevance"><strong>Joyun angle:</strong> {i["joyun_relevance"]}</p></div>'
+        f'<div class="card"><h3>{i.get("ingredient","")}</h3>'
+        f'<p class="trend">{i.get("trend","")}</p>'
+        f'<p class="relevance"><strong>Joyun angle:</strong> {i.get("joyun_relevance","")}</p></div>'
         for i in findings.get("hot_ingredients", [])
     ) or "<p>No new ingredient signals today.</p>"
 
-    # Competitor activity HTML
     comp_html = "\n".join(
-        f'<div class="card threat-{threat_class(c["threat_level"])}">'
-        f'<h3>{c["brand"]} <span class="badge">{c["threat_level"]}</span></h3>'
-        f'<p>{c["activity"]}</p><p class="implication">→ {c["implication"]}</p></div>'
+        f'<div class="card threat-{threat_class(c.get("threat_level",""))}">'
+        f'<h3>{c.get("brand","")} <span class="badge">{c.get("threat_level","")}</span></h3>'
+        f'<p>{c.get("activity","")}</p><p class="implication">→ {c.get("implication","")}</p></div>'
         for c in findings.get("competitor_activity", [])
     ) or "<p>No competitor moves today.</p>"
 
-    # Opportunities HTML
     opp_html = "\n".join(
-        f'<div class="card"><h3>{o["opportunity"]}</h3>'
-        f'<p>{o["rationale"]}</p>'
-        f'<p class="action"><strong>Action:</strong> {o["suggested_action"]}</p></div>'
+        f'<div class="card"><h3>{o.get("opportunity","")}</h3>'
+        f'<p>{o.get("rationale","")}</p>'
+        f'<p class="action"><strong>Action:</strong> {o.get("suggested_action","")}</p></div>'
         for o in findings.get("opportunities", [])
     ) or "<p>No new opportunities flagged.</p>"
 
-    # Where Joyun shines HTML
     shine_html = "\n".join(
         f"<li>{s}</li>" for s in findings.get("where_joyun_can_shine", [])
     ) or "<li>Run more research to surface differentiators.</li>"
 
-    stats = findings.get("stats", {})
+    stats = findings.get("stats", {}) or {}
     alert = findings.get("alert") or "No urgent alerts today."
 
     html = (
@@ -278,16 +313,16 @@ def render_dashboard(findings: dict) -> None:
 
 
 def main() -> None:
+    print(f"Provider: {PROVIDER}")
     findings = run_research()
     write_csv(findings)
     write_report(findings)
     render_dashboard(findings)
 
-    # Save findings JSON too — useful for the telegram script and debugging
     (DATA_DIR / f"findings_{TODAY}.json").write_text(
         json.dumps(findings, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    print("✅ Daily run complete.")
+    print("Daily run complete.")
 
 
 if __name__ == "__main__":
