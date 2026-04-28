@@ -4,7 +4,7 @@
 All Rights Reserved
 ```
 Automated daily competitive intelligence for Joyun (Indian skincare brand).
-**Using Claude API + GitHub Actions.**
+**Using Claude API / Gemini API + GitHub Actions.**
 
 ## Pipeline
 
