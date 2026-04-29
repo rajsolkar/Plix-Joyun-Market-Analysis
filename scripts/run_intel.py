@@ -1,24 +1,18 @@
 #!/usr/bin/env python3
 """
-Joyun Competitive Intelligence — Daily Research Runner
+Joyun Competitive Intelligence — Daily Research Runner (V2.1 with retries)
 Supports BOTH Google Gemini (free tier) and Anthropic Claude (paid).
 
 Switch providers with the LLM_PROVIDER env var:
   LLM_PROVIDER=gemini  (default)
   LLM_PROVIDER=claude
-
-Pipeline:
-  1. Call the configured LLM with web search to research skincare market
-  2. Parse structured JSON output
-  3. Write CSV (10 cols per CSV_STRUCTURE.md)
-  4. Write Markdown report
-  5. Render dashboard.html from template
 """
 
 import os
 import json
 import csv
 import re
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -35,12 +29,14 @@ CSV_PATH = DATA_DIR / f"joyun_intel_{TODAY}.csv"
 REPORT_PATH = DATA_DIR / f"joyun_report_{TODAY}.md"
 
 PROVIDER = os.environ.get("LLM_PROVIDER", "gemini").lower()
-
-# Model knobs — change these at the top, not buried in code.
 GEMINI_MODEL = "gemini-2.5-flash"
 CLAUDE_MODEL = "claude-sonnet-4-6"
 
-# ─── The research prompt (provider-agnostic) ──────────────────────────────────
+# Retry policy for transient 503 / rate-limit errors
+MAX_RETRIES = 4
+RETRY_BASE_DELAY = 8  # seconds; doubles each retry: 8, 16, 32, 64
+
+# ─── Research prompt ──────────────────────────────────────────────────────────
 RESEARCH_PROMPT = f"""You are the daily competitive intelligence analyst for Joyun, an Indian skincare brand.
 
 JOYUN'S CURRENT PRODUCTS:
@@ -121,43 +117,72 @@ CRITICAL RULES:
 """
 
 
+# ─── Retry helpers ────────────────────────────────────────────────────────────
+def _is_transient_error(err) -> bool:
+    """Detect transient errors that should be retried."""
+    msg = str(err).lower()
+    if any(s in msg for s in ["503", "unavailable", "overloaded", "rate", "429", "timeout"]):
+        return True
+    code = getattr(err, "code", None)
+    return code in (503, 429)
+
+
+def call_with_retry(fn, label="call"):
+    """Run fn(), retrying on transient errors with exponential backoff."""
+    last_err = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return fn()
+        except Exception as e:
+            last_err = e
+            if _is_transient_error(e) and attempt < MAX_RETRIES:
+                delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                print(f"     [{label}] transient error ({type(e).__name__}: {str(e)[:100]}), "
+                      f"retrying in {delay}s (attempt {attempt}/{MAX_RETRIES})...")
+                time.sleep(delay)
+                continue
+            raise
+    raise last_err
+
+
 # ─── Provider implementations ─────────────────────────────────────────────────
 def run_research_gemini() -> str:
-    """Call Gemini 2.5 Flash with google_search grounding. Returns full text."""
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
-    print(f"[{datetime.now().isoformat()}] Calling Gemini ({GEMINI_MODEL}) with google_search…")
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=RESEARCH_PROMPT,
-        config=types.GenerateContentConfig(
-            tools=[types.Tool(google_search=types.GoogleSearch())],
-            temperature=0.3,
-        ),
-    )
+    print(f"[{datetime.now().isoformat()}] Calling Gemini ({GEMINI_MODEL}) with google_search...")
+
+    def _do_call():
+        return client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=RESEARCH_PROMPT,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                temperature=0.3,
+            ),
+        )
+
+    response = call_with_retry(_do_call, label="gemini")
     return response.text or ""
 
 
 def run_research_claude() -> str:
-    """Call Claude with web_search tool. Returns full text."""
     import anthropic
 
-    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+    client = anthropic.Anthropic()
+    print(f"[{datetime.now().isoformat()}] Calling Claude ({CLAUDE_MODEL}) with web_search...")
 
-    print(f"[{datetime.now().isoformat()}] Calling Claude ({CLAUDE_MODEL}) with web_search…")
-    response = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=8000,
-        messages=[{"role": "user", "content": RESEARCH_PROMPT}],
-        tools=[{
-            "type": "web_search_20250305",
-            "name": "web_search",
-            "max_uses": 8,
-        }],
-    )
+    def _do_call():
+        return client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=8000,
+            messages=[{"role": "user", "content": RESEARCH_PROMPT}],
+            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}],
+        )
+
+    response = call_with_retry(_do_call, label="claude")
     return "".join(b.text for b in response.content if b.type == "text")
 
 
@@ -170,12 +195,10 @@ def run_research() -> dict:
     else:
         raise ValueError(f"Unknown LLM_PROVIDER: {PROVIDER}")
 
-    # Try fenced ```json block first; fall back to last {…} blob if model omitted fences
     match = re.search(r"```json\s*(\{.*?\})\s*```", full_text, re.DOTALL)
     if match:
         json_str = match.group(1)
     else:
-        # fallback: grab the largest balanced JSON object in the response
         candidates = re.findall(r"\{(?:[^{}]|(?:\{[^{}]*\}))*\}", full_text, re.DOTALL)
         candidates = [c for c in candidates if '"items"' in c and '"summary"' in c]
         if not candidates:
